@@ -9,6 +9,7 @@ from zerver.lib.response import json_success
 from zerver.lib.typed_endpoint import JsonBodyPayload, typed_endpoint
 from zerver.lib.validator import WildValue, check_bool, check_int, check_string
 from zerver.lib.webhooks.common import (
+    MissingHTTPEventHeaderError,
     OptionalUserSpecifiedTopicStr,
     check_send_webhook_message,
     get_http_headers_from_filename,
@@ -37,12 +38,14 @@ class Helper:
         branches: str | None,
         user_specified_topic: str | None,
         repo: str,
+        event_type: str,
         format_pull_request_event: "FormatPullRequestEvent",
     ) -> None:
         self.payload = payload
         self.branches = branches
         self.user_specified_topic = user_specified_topic
         self.repo = repo
+        self.event_type = event_type
         self.format_pull_request_event = format_pull_request_event
 
 def get_issue_url(repo_url: str, issue_nr: int) -> str:
@@ -219,13 +222,34 @@ def handle_issues_event(helper:Helper)->tuple[str | None , str | None]:
     return topic_name,body
 
 def handle_issue_comment_event(helper:Helper)->tuple[str | None , str | None]:
-    body = format_issue_comment_event(
-        helper.payload,
-        include_title=helper.user_specified_topic is not None,
-    )
+    if helper.event_type == "pull_request_comment":
+        action = helper.payload["action"].tame(check_string)
+        if action == "created":
+            action_text = "[commented]"
+        else:
+            action_text = f"{action} a [comment]"
+        action_text += "({}) on".format(helper.payload["comment"]["html_url"].tame(check_string))
+
+        body = get_pull_request_event_message(
+            user_name=helper.payload["sender"]["login"].tame(check_string),
+            action=action_text,
+            url=helper.payload["issue"]["html_url"].tame(check_string),
+            number=helper.payload["issue"]["number"].tame(check_int),
+            message=helper.payload["comment"]["body"].tame(check_string),
+            type="PR",
+            title=helper.payload["issue"]["title"].tame(check_string),
+        )
+        topic_type = "PR"  # Set topic_type for pull request comments
+    else:
+        body = format_issue_comment_event(
+            helper.payload,
+            include_title=helper.user_specified_topic is not None,
+        )
+        topic_type = "issue"
+
     topic_name = TOPIC_WITH_PR_OR_ISSUE_INFO_TEMPLATE.format(
         repo=helper.payload["repository"]["name"].tame(check_string),
-        type="issue",
+        type=topic_type,
         id=helper.payload["issue"]["number"].tame(check_int),
         title=helper.payload["issue"]["title"].tame(check_string),
     )
@@ -294,11 +318,18 @@ def gogs_webhook_main(
 ) -> HttpResponse:
     repo = payload["repository"]["name"].tame(check_string)
     event = validate_extract_webhook_http_header(request, http_header_name, integration_name)
+    try:
+        event_type = validate_extract_webhook_http_header(
+            request, "x-gitea-event-type", integration_name
+        )
+    except MissingHTTPEventHeaderError:  # Raised when header is not present(mostly in test case). Set it to a default value
+        event_type = "default_event_type"
     helper = Helper(
         payload=payload,
         branches=branches,
         user_specified_topic=user_specified_topic,
         repo=repo,
+        event_type=event_type,
         format_pull_request_event= format_pull_request_event,
     )
 
