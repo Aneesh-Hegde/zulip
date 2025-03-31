@@ -137,3 +137,13 @@ Thanks for the fix! Could you also consider **this important** edge case?
             expected_message,
             HTTP_X_GITEA_EVENT_TYPE="pull_request_comment",
         )
+
+    def test_delete_branch(self) -> None:
+        expected_topic_name = "test-repo: Deleted branch test-branch-to-delete"
+        expected_message = "TestDeleter deleted branch `test-branch-to-delete`."
+        self.check_webhook("delete__branch", expected_topic_name, expected_message)
+
+    def test_delete_tag(self) -> None:
+        expected_topic_name = "test-repo: Deleted tag v1.0.0-test"
+        expected_message = "TestDeleter deleted tag `v1.0.0-test`."
+        self.check_webhook("delete__tag", expected_topic_name, expected_message)

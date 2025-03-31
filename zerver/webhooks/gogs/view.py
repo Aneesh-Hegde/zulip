@@ -16,6 +16,10 @@ from zerver.lib.webhooks.common import (
     validate_extract_webhook_http_header,
 )
 from zerver.lib.webhooks.git import (
+    REMOVE_BRANCH_MESSAGE_TEMPLATE,
+    REMOVE_BRANCH_TOPIC_TEMPLATE,
+    REMOVE_TAG_MESSAGE_TEMPLATE,
+    REMOVE_TAG_TOPIC_TEMPLATE,
     TOPIC_WITH_BRANCH_TEMPLATE,
     TOPIC_WITH_PR_OR_ISSUE_INFO_TEMPLATE,
     TOPIC_WITH_RELEASE_TEMPLATE,
@@ -47,6 +51,7 @@ class Helper:
         self.repo = repo
         self.event_type = event_type
         self.format_pull_request_event = format_pull_request_event
+
 
 def get_issue_url(repo_url: str, issue_nr: int) -> str:
     return f"{repo_url}/issues/{issue_nr}"
@@ -175,27 +180,38 @@ def format_release_event(payload: WildValue, include_title: bool = False) -> str
     return get_release_event_message(**data)
 
 
-def handle_push_event(helper:Helper)->tuple[str | None,str | None]:
+def get_remove_branch_event_message(user_name: str, branch_name: str) -> str:
+    return REMOVE_BRANCH_MESSAGE_TEMPLATE.format(
+        user_name=user_name, branch_name=f"`{branch_name}`"
+    )
+
+
+def get_remove_tag_event_message(user_name: str, tag_name: str) -> str:
+    return REMOVE_TAG_MESSAGE_TEMPLATE.format(user_name=user_name, tag_name=f"`{tag_name}`")
+
+
+def handle_push_event(helper: Helper) -> tuple[str | None, str | None]:
     branch = helper.payload["ref"].tame(check_string).replace("refs/heads/", "")
     if not is_branch_name_notifiable(branch, helper.branches):
-        return None,None
+        return None, None
     body = format_push_event(helper.payload)
     topic_name = TOPIC_WITH_BRANCH_TEMPLATE.format(
         repo=helper.repo,
         branch=branch,
     )
-    return topic_name,body
+    return topic_name, body
 
 
-def handle_create_event(helper:Helper)->tuple[str | None,str | None]:
+def handle_create_event(helper: Helper) -> tuple[str | None, str | None]:
     body = format_new_branch_event(helper.payload)
     topic_name = TOPIC_WITH_BRANCH_TEMPLATE.format(
         repo=helper.repo,
         branch=helper.payload["ref"].tame(check_string),
     )
-    return topic_name,body
+    return topic_name, body
 
-def handle_pull_request_event(helper:Helper)->tuple[str | None , str | None]:
+
+def handle_pull_request_event(helper: Helper) -> tuple[str | None, str | None]:
     body = helper.format_pull_request_event(
         helper.payload,
         include_title=helper.user_specified_topic is not None,
@@ -206,9 +222,10 @@ def handle_pull_request_event(helper:Helper)->tuple[str | None , str | None]:
         id=helper.payload["pull_request"]["id"].tame(check_int),
         title=helper.payload["pull_request"]["title"].tame(check_string),
     )
-    return topic_name,body
+    return topic_name, body
 
-def handle_issues_event(helper:Helper)->tuple[str | None , str | None]:
+
+def handle_issues_event(helper: Helper) -> tuple[str | None, str | None]:
     body = format_issues_event(
         helper.payload,
         include_title=helper.user_specified_topic is not None,
@@ -219,9 +236,10 @@ def handle_issues_event(helper:Helper)->tuple[str | None , str | None]:
         id=helper.payload["issue"]["number"].tame(check_int),
         title=helper.payload["issue"]["title"].tame(check_string),
     )
-    return topic_name,body
+    return topic_name, body
 
-def handle_issue_comment_event(helper:Helper)->tuple[str | None , str | None]:
+
+def handle_issue_comment_event(helper: Helper) -> tuple[str | None, str | None]:
     if helper.event_type == "pull_request_comment":
         action = helper.payload["action"].tame(check_string)
         if action == "created":
@@ -253,9 +271,10 @@ def handle_issue_comment_event(helper:Helper)->tuple[str | None , str | None]:
         id=helper.payload["issue"]["number"].tame(check_int),
         title=helper.payload["issue"]["title"].tame(check_string),
     )
-    return topic_name,body
+    return topic_name, body
 
-def handle_release_event(helper:Helper)->tuple[str | None , str | None]:
+
+def handle_release_event(helper: Helper) -> tuple[str | None, str | None]:
     body = format_release_event(
         helper.payload,
         include_title=helper.user_specified_topic is not None,
@@ -265,7 +284,33 @@ def handle_release_event(helper:Helper)->tuple[str | None , str | None]:
         tag=helper.payload["release"]["tag_name"].tame(check_string),
         title=helper.payload["release"]["name"].tame(check_string),
     )
-    return topic_name,body
+    return topic_name, body
+
+
+def handle_delete_event(helper: Helper) -> tuple[str | None, str | None]:
+    user_name = helper.payload["sender"]["login"].tame(check_string)
+    ref = helper.payload["ref"].tame(check_string)
+    repo_name = helper.repo
+
+    if helper.payload["ref_type"].tame(check_string) == "branch":
+        body = get_remove_branch_event_message(
+            user_name=user_name,
+            branch_name=ref,
+        )
+        topic_name = REMOVE_BRANCH_TOPIC_TEMPLATE.format(
+            repo=repo_name,
+            branch_name=ref,
+        )
+    elif helper.payload["ref_type"] == "tag":
+        body = get_remove_tag_event_message(
+            user_name=user_name,
+            tag_name=ref,
+        )
+        topic_name = REMOVE_TAG_TOPIC_TEMPLATE.format(
+            repo=repo_name,
+            tag_name=ref,
+        )
+    return topic_name, body
 
 
 GOGS_EVENT_FUNCTION_MAPPER: dict[str, Callable[[Helper], tuple[str | None, str | None]]] = {
@@ -275,6 +320,7 @@ GOGS_EVENT_FUNCTION_MAPPER: dict[str, Callable[[Helper], tuple[str | None, str |
     "issues": handle_issues_event,
     "issue_comment": handle_issue_comment_event,
     "release": handle_release_event,
+    "delete": handle_delete_event,
 }
 
 ALL_EVENT_TYPES = list(GOGS_EVENT_FUNCTION_MAPPER.keys())
@@ -322,7 +368,9 @@ def gogs_webhook_main(
         event_type = validate_extract_webhook_http_header(
             request, "x-gitea-event-type", integration_name
         )
-    except MissingHTTPEventHeaderError:  # Raised when header is not present(mostly in test case). Set it to a default value
+    except (
+        MissingHTTPEventHeaderError
+    ):  # Raised when header is not present(mostly in test case). Set it to a default value
         event_type = "default_event_type"
     helper = Helper(
         payload=payload,
@@ -330,7 +378,7 @@ def gogs_webhook_main(
         user_specified_topic=user_specified_topic,
         repo=repo,
         event_type=event_type,
-        format_pull_request_event= format_pull_request_event,
+        format_pull_request_event=format_pull_request_event,
     )
 
     handler = GOGS_EVENT_FUNCTION_MAPPER.get(event)
